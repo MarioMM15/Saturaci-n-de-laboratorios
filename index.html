@@ -1820,6 +1820,27 @@ function seedProyectos() {
 }
 
 /* ---------------------------- APP ---------------------------- */
+/* ---------------------------- LOGO MABE ----------------------------
+   Coloca el archivo del logo oficial en la raíz del repo como
+   "logo-mabe.png" (o .svg y cambia la extensión abajo). Si no se
+   encuentra el archivo, se muestra automáticamente la insignia "A". */
+function LogoMabe() {
+  const [err, setErr] = useState(false);
+  if (err) {
+    return (
+      <div className="rounded-lg flex items-center justify-center font-black" style={{ width: 30, height: 30, background: "#fff", color: TEAL }}>A</div>
+    );
+  }
+  return (
+    <img
+      src="logo-mabe.png"
+      alt="Mabe"
+      onError={() => setErr(true)}
+      style={{ height: 30, width: "auto", display: "block", background: "#fff", borderRadius: 8, padding: "3px 7px", boxSizing: "border-box" }}
+    />
+  );
+}
+
 function App() {
   const [tab, setTab] = useState("Simulador");
   const [step, setStep] = useState(1);
@@ -1888,7 +1909,7 @@ function App() {
       <div style={{ background: TEAL }} className="text-white">
         <div className="ads-wrap px-4 py-3 flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
-            <div className="rounded-lg flex items-center justify-center font-black" style={{ width: 30, height: 30, background: "#fff", color: TEAL }}>A</div>
+            <LogoMabe />
             <div>
               <div className="font-bold leading-tight">Calculadora de Saturación ADS</div>
               <div className="ads-t11 opacity-80 leading-tight">Metrología Dimensional 3D · {lab.pais} / {lab.planta}</div>
