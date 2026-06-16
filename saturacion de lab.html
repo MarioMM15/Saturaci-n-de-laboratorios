@@ -1,0 +1,1955 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Calculadora de Saturación ADS · Metrología Dimensional 3D</title>
+  <meta name="description" content="Calculadora de saturación de laboratorios de metrología dimensional 3D (ScanBox, HandySCAN, PolyWorks). Carga actual + proyectos NPI, por semana y por turno." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23156082'/%3E%3Ctext x='16' y='23' font-size='20' font-family='sans-serif' font-weight='900' fill='white' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E" />
+
+  <!-- Tailwind (Play CDN: incluye compilador JIT en el navegador) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React 18 + ReactDOM 18 (UMD) -->
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel standalone: transpila el JSX en el navegador -->
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; }
+    #loader {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      background: #F9FAFB; color: #156082;
+      font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    }
+    #loader .ring {
+      width: 38px; height: 38px; border-radius: 50%;
+      border: 4px solid #cfe0e8; border-top-color: #156082;
+      animation: spin 0.8s linear infinite;
+    }
+    #loader .txt { font-size: 13px; color: #64748b; font-weight: 500; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="loader">
+      <div class="ring"></div>
+      <div class="txt">Cargando calculadora…</div>
+    </div>
+  </div>
+
+  <script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+
+/* ============================================================
+   CALCULADORA DE SATURACIÓN ADS — Metrología Dimensional 3D
+   App autónoma. Todo el estado vive en React (sin localStorage).
+   ============================================================ */
+
+/* ---------------------------- CATÁLOGOS ---------------------------- */
+const PLANTAS = {
+  "México": ["SLP", "Saltillo", "Celaya", "Querétaro"],
+  "Colombia": ["Manizales"],
+  "Ecuador": ["Guayaquil"],
+  "Argentina": ["Cañuelas"],
+};
+const MODELOS_EQUIPO = ["ScanBox", "HandySCAN", "MetraSCAN", "CMM"];
+const COMPLEJIDADES = ["AA", "A", "B", "C"];
+const NIVELES = { Experto: 1.0, Avanzado: 1.25, Intermedio: 1.6, Iniciación: 2.2 };
+const NIVELES_LIST = Object.keys(NIVELES);
+
+const ETAPAS_NPI = [
+  { clave: "KO", nombre: "Concepto (Kick-off)", semanaUnica: true },
+  { clave: "SC", nombre: "Scope", semanaUnica: true },
+  { clave: "DPP", nombre: "Desarrollo Producto–Proceso", semanaUnica: false },
+  { clave: "ES", nombre: "Evaluación de Sistema", semanaUnica: false },
+  { clave: "PAS", nombre: "Pasaporte", semanaUnica: true },
+  { clave: "VPP", nombre: "Validación Producto–Proceso", semanaUnica: false },
+  { clave: "LP", nombre: "Liberación a Producción", semanaUnica: true },
+];
+
+const TIEMPOS = {
+  templateScanBox: { AA: 9, A: 6, B: 3, C: 2 },
+  escaneoScanBox: { AA: 0.5, A: 0.3, B: 0.25, C: 0.16 },
+  escaneoHandyScan: { AA: 0.5, A: 0.3, B: 0.25, C: 0.16 },
+  templatePolyWorks: { AA: 20, A: 16, B: 9, C: 5 },
+  medicionPolyWorks: { AA: 3, A: 2, B: 0.5, C: 0.5 },
+};
+const ATENCION = {
+  templateScanBox: 1.0,
+  escaneoScanBoxSerie: 0.15,
+  escaneoManual: 1.0,
+  templatePolyWorks: 1.0,
+  medicionPolyWorks: 0.65,
+};
+
+/* ---------------------------- PALETA ---------------------------- */
+const TEAL = "#156082";
+const VERDE = "#1D9E75";
+const ROJO = "#E24B4A";
+const PROJECT_COLORS = ["#D85A30", "#D4537E", "#BA7517", "#534AB7", "#378ADD", "#993C1D"];
+
+/* ---------------------------- HELPERS ---------------------------- */
+let _id = 1;
+const uid = () => "id" + _id++;
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const r1 = (n) => Math.round(n * 10) / 10;
+
+function factorPromedio(ingenieros) {
+  if (!ingenieros.length) return 1.0;
+  const s = ingenieros.reduce((a, i) => a + (NIVELES[i.nivel] || 1), 0);
+  return s / ingenieros.length;
+}
+
+// Horas crudas (nivel Experto 1.0) por número de parte / actividad
+function partHours(C, piezas, metodo, reqTemplateScan, reqTemplatePW, hacePW) {
+  const usaSB = metodo === "ScanBox" || metodo === "Ambos";
+  const usaH = metodo === "HandySCAN" || metodo === "Ambos";
+  return {
+    hTemplateScan: reqTemplateScan && usaSB ? TIEMPOS.templateScanBox[C] : 0,
+    hEscaneoScanBox: usaSB ? TIEMPOS.escaneoScanBox[C] * piezas : 0,
+    hEscaneoHandy: usaH ? TIEMPOS.escaneoHandyScan[C] * piezas : 0,
+    hTemplatePW: hacePW && reqTemplatePW ? TIEMPOS.templatePolyWorks[C] : 0,
+    hMedicionPW: hacePW ? TIEMPOS.medicionPolyWorks[C] * piezas : 0,
+  };
+}
+function partDemand(h, factor) {
+  return {
+    scanBox: (h.hTemplateScan + h.hEscaneoScanBox) * factor,
+    handy: h.hEscaneoHandy * factor,
+    ing:
+      (h.hTemplateScan * ATENCION.templateScanBox +
+        h.hEscaneoScanBox * ATENCION.escaneoScanBoxSerie +
+        h.hEscaneoHandy * ATENCION.escaneoManual +
+        h.hTemplatePW * ATENCION.templatePolyWorks +
+        h.hMedicionPW * ATENCION.medicionPolyWorks) *
+      factor,
+    pw: (h.hTemplatePW + h.hMedicionPW) * factor,
+    horas: h,
+    factor,
+  };
+}
+
+/* ---------------------------- MOTOR DE CÁLCULO ---------------------------- */
+// Devuelve modelo semanal completo con desglose por fuente.
+function computeModel(lab, cargaBase, proyectos, filtros) {
+  const WEEKS = 52;
+  const factor = factorPromedio(lab.ingenieros);
+
+  const activos = lab.equipos.filter((e) => e.estado === "Activo");
+  const nScanBox = activos.filter((e) => e.modelo === "ScanBox").length;
+  const nHandy = activos.filter((e) => e.modelo === "HandySCAN").length;
+  const nIng = lab.ingenieros.length;
+  const nLic = Number(lab.licenciasPW) || 0;
+
+  const perScannerCap = lab.hrsTurno * lab.diasSemana * lab.turnos;
+  const perIngCap = lab.hrsTurno * lab.diasSemana; // ingeniero ligado a un turno
+  const perPWCap = lab.hrsTurno * lab.diasSemana * lab.turnos;
+
+  const capScanBox = nScanBox * perScannerCap;
+  const capHandy = nHandy * perScannerCap;
+  const capIng = nIng * perIngCap;
+  const capPW = nLic * perPWCap;
+
+  // weeks[w] = { scanBox:{src:hrs}, handy:{}, ing:{}, pw:{} }
+  const empty = () => ({ scanBox: {}, handy: {}, ing: {}, pw: {} });
+  const weeks = Array.from({ length: WEEKS + 1 }, empty);
+
+  const add = (w, res, src, hrs) => {
+    if (!hrs) return;
+    weeks[w][res][src] = (weeks[w][res][src] || 0) + hrs;
+  };
+
+  // ---- Carga base (constante en todas las semanas)
+  const plantaOn = filtros.planta;
+  if (plantaOn) {
+    cargaBase.forEach((a) => {
+      const piezas = Number(a.piezasPorSemana) || 0;
+      const h = partHours(
+        a.complejidad,
+        piezas,
+        a.equipoRequerido,
+        a.requiereTemplate,
+        a.requiereTemplate,
+        a.requierePW
+      );
+      const d = partDemand(h, factor);
+      for (let w = 1; w <= WEEKS; w++) {
+        add(w, "scanBox", "planta", d.scanBox);
+        add(w, "handy", "planta", d.handy);
+        add(w, "ing", "planta", d.ing);
+        add(w, "pw", "planta", d.pw);
+      }
+    });
+  }
+
+  // ---- Proyectos NPI
+  proyectos.forEach((p, pi) => {
+    if (!filtros.proyectos[p.id]) return;
+    const src = p.id;
+    p.etapas.forEach((e) => {
+      const ini = clamp(Number(e.semanaInicio) || 1, 1, WEEKS);
+      const fin = clamp(Number(e.semanaFin) || ini, ini, WEEKS);
+      const nW = fin - ini + 1;
+      // demanda total de la etapa
+      let etScanBox = 0,
+        etHandy = 0,
+        etIng = 0,
+        etPw = 0;
+      e.partes.forEach((pt) => {
+        const piezas = Number(pt.piezas) || 0;
+        const h = partHours(
+          pt.complejidad,
+          piezas,
+          pt.metodo,
+          pt.requiereTemplateScan,
+          pt.requiereTemplatePW,
+          true
+        );
+        const d = partDemand(h, factor);
+        etScanBox += d.scanBox;
+        etHandy += d.handy;
+        etIng += d.ing;
+        etPw += d.pw;
+      });
+      // distribución uniforme entre las semanas del rango
+      for (let w = ini; w <= fin; w++) {
+        add(w, "scanBox", src, etScanBox / nW);
+        add(w, "handy", src, etHandy / nW);
+        add(w, "ing", src, etIng / nW);
+        add(w, "pw", src, etPw / nW);
+      }
+    });
+  });
+
+  const sumSrc = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+  const sat = (dem, cap) => (cap > 0 ? (dem / cap) * 100 : dem > 0 ? 9999 : 0);
+
+  // Serie semanal de saturaciones por recurso
+  const serie = [];
+  for (let w = 1; w <= WEEKS; w++) {
+    const ds = sumSrc(weeks[w].scanBox);
+    const dh = sumSrc(weeks[w].handy);
+    const di = sumSrc(weeks[w].ing);
+    const dp = sumSrc(weeks[w].pw);
+    serie.push({
+      week: w,
+      scanBox: { dem: ds, sat: sat(ds, capScanBox) },
+      handy: { dem: dh, sat: sat(dh, capHandy) },
+      ing: { dem: di, sat: sat(di, capIng) },
+      pw: { dem: dp, sat: sat(dp, capPW) },
+      scanner: { sat: Math.max(sat(ds, capScanBox), sat(dh, capHandy)) },
+      maxSat: Math.max(
+        sat(ds, capScanBox),
+        sat(dh, capHandy),
+        sat(di, capIng),
+        sat(dp, capPW)
+      ),
+    });
+  }
+
+  // Semana más saturada
+  let worst = serie[0];
+  serie.forEach((s) => {
+    if (s.maxSat > worst.maxSat) worst = s;
+  });
+
+  // Cuello de botella (en la semana peor)
+  const resSats = [
+    { key: "scanner", label: "Scanner", sat: worst.scanner.sat },
+    { key: "ing", label: "Ingeniero", sat: worst.ing.sat },
+    { key: "pw", label: "Licencia PW", sat: worst.pw.sat },
+  ];
+  const bottleneck = resSats.reduce((a, b) => (b.sat > a.sat ? b : a), resSats[0]);
+
+  // Déficit / recursos adicionales en la semana peor
+  const deficit = {
+    scanBox:
+      worst.scanBox.dem > capScanBox && perScannerCap > 0
+        ? Math.ceil((worst.scanBox.dem - capScanBox) / perScannerCap)
+        : 0,
+    handy:
+      worst.handy.dem > capHandy && perScannerCap > 0
+        ? Math.ceil((worst.handy.dem - capHandy) / perScannerCap)
+        : 0,
+    ing:
+      worst.ing.dem > capIng && perIngCap > 0
+        ? Math.ceil((worst.ing.dem - capIng) / perIngCap)
+        : 0,
+    pw:
+      worst.pw.dem > capPW && perPWCap > 0
+        ? Math.ceil((worst.pw.dem - capPW) / perPWCap)
+        : 0,
+  };
+  const scannersNeeded = deficit.scanBox + deficit.handy;
+
+  // Turno más comprometido (en la semana peor) — reparto uniforme de demanda de ing
+  let turnoCrit = null;
+  if (lab.turnos > 0) {
+    let best = -1;
+    for (let s = 1; s <= lab.turnos; s++) {
+      const eng = lab.ingenieros.filter((i) => i.turno === "T" + s).length;
+      const share = worst.ing.dem / lab.turnos;
+      const cap = eng * perIngCap;
+      const ts = cap > 0 ? (share / cap) * 100 : share > 0 ? 9999 : 0;
+      if (ts > best) {
+        best = ts;
+        turnoCrit = { turno: "T" + s, sat: ts, eng };
+      }
+    }
+  }
+
+  return {
+    factor,
+    counts: { nScanBox, nHandy, nIng, nLic },
+    caps: { capScanBox, capHandy, capIng, capPW, perScannerCap, perIngCap, perPWCap },
+    weeks,
+    serie,
+    worst,
+    bottleneck,
+    deficit,
+    scannersNeeded,
+    turnoCrit,
+    sumSrc,
+  };
+}
+
+/* ---------------------------- ESCALA DE SATURACIÓN ---------------------------- */
+function satStyle(pct) {
+  if (pct < 80) return { bg: "#ECFDF5", text: "#047857", bar: VERDE, label: "Capacidad OK" };
+  if (pct < 100) return { bg: "#FFFBEB", text: "#B45309", bar: "#BA7517", label: "Riesgo alto" };
+  if (pct < 120) return { bg: "#FEF2F2", text: "#DC2626", bar: ROJO, label: "Sin capacidad" };
+  return { bg: "#FEE2E2", text: "#B91C1C", bar: "#991B1B", label: "Déficit crítico" };
+}
+
+/* ---------------------------- UI PRIMITIVES ---------------------------- */
+function Btn({ children, variant = "primary", className = "", ...p }) {
+  const base =
+    "inline-flex items-center justify-center gap-1 rounded-lg font-medium transition-colors px-4 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed";
+  const styles = {
+    primary: { background: TEAL, color: "#fff" },
+    secondary: { background: "#fff", color: TEAL, border: `1px solid ${TEAL}` },
+    ghost: { background: "#F3F4F6", color: "#374151" },
+    danger: { background: "#fff", color: ROJO, border: "1px solid #FCA5A5" },
+  };
+  return (
+    <button className={base + " " + className} style={styles[variant]} {...p}>
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, children, hint }) {
+  return (
+    <label className="block">
+      <span className="block text-xs font-medium text-gray-600 mb-1">{label}</span>
+      {children}
+      {hint && <span className="block ads-t11 text-gray-400 mt-0.5">{hint}</span>}
+    </label>
+  );
+}
+const inputCls =
+  "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-offset-0";
+function TextInput(p) {
+  return <input type="text" className={inputCls} style={{ caretColor: TEAL }} {...p} />;
+}
+function NumberInput({ value, onChange, min, max, step, ...p }) {
+  return (
+    <input
+      type="number"
+      className={inputCls}
+      value={value}
+      min={min}
+      max={max}
+      step={step}
+      onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
+      {...p}
+    />
+  );
+}
+function Select({ value, onChange, options, ...p }) {
+  return (
+    <select
+      className={inputCls + " bg-white"}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      {...p}
+    >
+      {options.map((o) =>
+        typeof o === "string" ? (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ) : (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        )
+      )}
+    </select>
+  );
+}
+function Toggle({ value, onChange, labels = ["Sí", "No"] }) {
+  return (
+    <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">
+      <button
+        type="button"
+        onClick={() => onChange(true)}
+        className="px-3 py-1.5 font-medium"
+        style={value ? { background: TEAL, color: "#fff" } : { background: "#fff", color: "#6B7280" }}
+      >
+        {labels[0]}
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange(false)}
+        className="px-3 py-1.5 font-medium"
+        style={!value ? { background: "#6B7280", color: "#fff" } : { background: "#fff", color: "#6B7280" }}
+      >
+        {labels[1]}
+      </button>
+    </div>
+  );
+}
+function Card({ children, className = "", style }) {
+  return (
+    <div className={"bg-white border border-gray-200 rounded-xl " + className} style={style}>
+      {children}
+    </div>
+  );
+}
+function Pill({ children, bg, color }) {
+  return (
+    <span
+      className="inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold"
+      style={{ background: bg, color }}
+    >
+      {children}
+    </span>
+  );
+}
+function Bar({ pct, color }) {
+  const st = satStyle(pct);
+  return (
+    <div className="w-full">
+      <div className="h-3 w-full rounded-full bg-gray-100 overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: clamp(pct, 0, 100) + "%", background: color || st.bar }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- SILUETAS (VASOS) ---------------------------- */
+// Capa de llenado: se apila desde abajo por fuente; rebasa en rojo si >100%.
+function FillLayer({ pct, segments }) {
+  const fillH = clamp(pct, 0, 100);
+  return (
+    <div style={{ position: "absolute", inset: 0 }}>
+      <div
+        style={{
+          position: "absolute",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: fillH + "%",
+          display: "flex",
+          flexDirection: "column-reverse",
+        }}
+      >
+        {segments.map((s, i) => (
+          <div key={i} style={{ height: s.frac * 100 + "%", background: s.color }} />
+        ))}
+      </div>
+      {pct > 100 && (
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: clamp(pct - 100, 0, 100) + "%",
+            background: ROJO,
+            opacity: 0.5,
+          }}
+        />
+      )}
+    </div>
+  );
+}
+const partBox = {
+  position: "relative",
+  overflow: "hidden",
+  border: "1.5px solid #aaa",
+  background: "rgba(180,180,180,0.18)",
+};
+
+function PersonSilhouette({ pct, segments }) {
+  const fl = () => <FillLayer pct={pct} segments={segments} />;
+  return (
+    <div className="flex flex-col items-center" style={{ width: 46 }}>
+      {/* cabeza */}
+      <div style={{ ...partBox, width: 20, height: 20, borderRadius: "50%" }}>{fl()}</div>
+      {/* torso */}
+      <div style={{ ...partBox, width: 30, height: 30, borderRadius: 6, marginTop: 2 }}>{fl()}</div>
+      {/* piernas */}
+      <div className="flex gap-1" style={{ marginTop: 2 }}>
+        <div style={{ ...partBox, width: 12, height: 26, borderRadius: 4 }}>{fl()}</div>
+        <div style={{ ...partBox, width: 12, height: 26, borderRadius: 4 }}>{fl()}</div>
+      </div>
+    </div>
+  );
+}
+function ScannerSilhouette({ pct, segments }) {
+  const fl = () => <FillLayer pct={pct} segments={segments} />;
+  return (
+    <div className="flex flex-col items-center" style={{ width: 46 }}>
+      <div style={{ ...partBox, width: 14, height: 10, borderRadius: 3 }}>{fl()}</div>
+      <div style={{ ...partBox, width: 26, height: 22, borderRadius: 4, marginTop: 2 }}>{fl()}</div>
+      <div style={{ ...partBox, width: 5, height: 18, borderRadius: 2, marginTop: 2 }}>{fl()}</div>
+      <div style={{ ...partBox, width: 38, height: 8, borderRadius: 2, marginTop: 2 }}>{fl()}</div>
+    </div>
+  );
+}
+function MonitorSilhouette({ pct, segments }) {
+  const fl = () => <FillLayer pct={pct} segments={segments} />;
+  return (
+    <div className="flex flex-col items-center" style={{ width: 46 }}>
+      <div style={{ ...partBox, width: 40, height: 28, borderRadius: 4 }}>{fl()}</div>
+      <div style={{ ...partBox, width: 8, height: 8, marginTop: 1 }}>{fl()}</div>
+      <div style={{ ...partBox, width: 30, height: 6, borderRadius: 2, marginTop: 1 }}>{fl()}</div>
+    </div>
+  );
+}
+
+// Vaso individual con etiqueta + estado de desborde / cuello de botella
+function Vessel({ kind, pct, segments, title, subtitle, bottleneck }) {
+  const Sil = kind === "person" ? PersonSilhouette : kind === "scanner" ? ScannerSilhouette : MonitorSilhouette;
+  const st = satStyle(pct);
+  const over = pct > 100;
+  return (
+    <div
+      className="flex flex-col items-center rounded-xl p-2"
+      style={{
+        minWidth: 92,
+        border: bottleneck ? `2px solid ${ROJO}` : "1px solid #E5E7EB",
+        background: bottleneck ? "#FEF2F2" : "#fff",
+      }}
+    >
+      {bottleneck && (
+        <span className="ads-t9 font-bold mb-1" style={{ color: ROJO }}>
+          ⚠ Cuello de botella
+        </span>
+      )}
+      <div className="relative">
+        <Sil pct={pct} segments={segments} />
+        {over && (
+          <div
+            className="absolute -right-2 -top-2 flex items-center justify-center rounded-full ads-t10 font-bold"
+            style={{ width: 18, height: 18, background: ROJO, color: "#fff" }}
+            title="Se necesita +1"
+          >
+            +
+          </div>
+        )}
+      </div>
+      <span className="mt-1 ads-t11 font-semibold text-gray-700 text-center leading-tight">{title}</span>
+      {subtitle && <span className="ads-t9 text-gray-400 text-center leading-tight">{subtitle}</span>}
+      <span className="ads-t11 font-bold mt-0.5" style={{ color: st.text }}>
+        {r1(pct)}%
+      </span>
+      {over && <span className="ads-t8 font-medium" style={{ color: ROJO }}>Se necesita +1</span>}
+    </div>
+  );
+}
+
+/* ---------------------------- NAV ---------------------------- */
+function StepPills({ step }) {
+  const steps = ["Laboratorio", "Carga actual", "Proyectos", "Resultado"];
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      {steps.map((s, i) => {
+        const idx = i + 1;
+        const state = idx === step ? "cur" : idx < step ? "done" : "todo";
+        const style =
+          state === "cur"
+            ? { background: TEAL, color: "#fff" }
+            : state === "done"
+            ? { background: VERDE, color: "#fff" }
+            : { background: "#E5E7EB", color: "#6B7280" };
+        return (
+          <React.Fragment key={s}>
+            <span className="rounded-full px-3 py-1 text-xs font-semibold" style={style}>
+              {idx}. {s}
+            </span>
+            {i < steps.length - 1 && <span className="text-gray-300">›</span>}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------------------------- PANTALLA 1: LABORATORIO ---------------------------- */
+function Pantalla1({ lab, setLab, onNext }) {
+  const update = (patch) => setLab({ ...lab, ...patch });
+  const paises = Object.keys(PLANTAS);
+
+  const addEquipo = () =>
+    update({
+      equipos: [
+        ...lab.equipos,
+        { id: uid(), nombre: `Equipo #${lab.equipos.length + 1}`, modelo: "ScanBox", tipoEscaneo: "Automatizado", estado: "Activo" },
+      ],
+    });
+  const updEquipo = (id, patch) =>
+    update({ equipos: lab.equipos.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
+  const delEquipo = (id) => update({ equipos: lab.equipos.filter((e) => e.id !== id) });
+
+  const addIng = () =>
+    update({
+      ingenieros: [
+        ...lab.ingenieros,
+        { id: uid(), nombre: `Ingeniero ${lab.ingenieros.length + 1}`, nivel: "Avanzado", turno: "T1", puedeOperar: "Ambos" },
+      ],
+    });
+  const updIng = (id, patch) =>
+    update({ ingenieros: lab.ingenieros.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
+  const delIng = (id) => update({ ingenieros: lab.ingenieros.filter((e) => e.id !== id) });
+
+  const turnoOpts = Array.from({ length: lab.turnos }, (_, i) => "T" + (i + 1));
+  const activos = lab.equipos.filter((e) => e.estado === "Activo").length;
+  const errors = [];
+  if (activos < 1) errors.push("Se requiere al menos 1 equipo activo.");
+  if (lab.ingenieros.length < 1) errors.push("Se requiere al menos 1 ingeniero.");
+  if ((Number(lab.licenciasPW) || 0) < 1) errors.push("Se requiere al menos 1 licencia PolyWorks.");
+
+  return (
+    <div className="space-y-5">
+      {/* Sección A */}
+      <Card className="p-5">
+        <h3 className="font-semibold text-gray-800 mb-3">A · Datos generales</h3>
+        <div className="grid grid-cols-2 gap-4">
+          <Field label="País">
+            <Select
+              value={lab.pais}
+              onChange={(v) => update({ pais: v, planta: PLANTAS[v][0] })}
+              options={paises}
+            />
+          </Field>
+          <Field label="Planta">
+            <Select value={lab.planta} onChange={(v) => update({ planta: v })} options={PLANTAS[lab.pais]} />
+          </Field>
+          <Field label="Turnos operativos">
+            <Select
+              value={String(lab.turnos)}
+              onChange={(v) => {
+                const t = Number(v);
+                update({
+                  turnos: t,
+                  ingenieros: lab.ingenieros.map((i) =>
+                    Number(i.turno.slice(1)) > t ? { ...i, turno: "T" + t } : i
+                  ),
+                });
+              }}
+              options={[
+                { value: "1", label: "1 turno" },
+                { value: "2", label: "2 turnos" },
+                { value: "3", label: "3 turnos" },
+              ]}
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Horas / turno">
+              <NumberInput value={lab.hrsTurno} min={1} max={24} onChange={(v) => update({ hrsTurno: v })} />
+            </Field>
+            <Field label="Días / semana">
+              <NumberInput value={lab.diasSemana} min={1} max={7} onChange={(v) => update({ diasSemana: v })} />
+            </Field>
+          </div>
+        </div>
+      </Card>
+
+      {/* Sección B */}
+      <Card className="p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-gray-800">B · Equipos de medición</h3>
+          <Btn variant="secondary" onClick={addEquipo}>+ Agregar equipo</Btn>
+        </div>
+        <div className="space-y-2">
+          {lab.equipos.map((e) => (
+            <div key={e.id} className="grid grid-cols-12 gap-2 items-end bg-gray-50 rounded-lg p-2">
+              <div className="col-span-3">
+                <Field label="Nombre">
+                  <TextInput value={e.nombre} onChange={(ev) => updEquipo(e.id, { nombre: ev.target.value })} />
+                </Field>
+              </div>
+              <div className="col-span-3">
+                <Field label="Modelo">
+                  <Select value={e.modelo} onChange={(v) => updEquipo(e.id, { modelo: v })} options={MODELOS_EQUIPO} />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <Field label="Escaneo">
+                  <Select value={e.tipoEscaneo} onChange={(v) => updEquipo(e.id, { tipoEscaneo: v })} options={["Automatizado", "Manual", "Ambos"]} />
+                </Field>
+              </div>
+              <div className="col-span-3">
+                <Field label="Estado">
+                  <Select value={e.estado} onChange={(v) => updEquipo(e.id, { estado: v })} options={["Activo", "En mantenimiento", "Fuera de servicio"]} />
+                </Field>
+              </div>
+              <div className="col-span-1 flex justify-end">
+                <Btn variant="danger" className="ads-iconbtn" onClick={() => delEquipo(e.id)}>✕</Btn>
+              </div>
+            </div>
+          ))}
+          {!lab.equipos.length && <p className="text-sm text-gray-400">Sin equipos. Agrega al menos uno.</p>}
+        </div>
+      </Card>
+
+      {/* Sección C */}
+      <Card className="p-5">
+        <h3 className="font-semibold text-gray-800 mb-3">C · Licencias de software</h3>
+        <div className="w-48">
+          <Field label="Licencias PolyWorks">
+            <NumberInput value={lab.licenciasPW} min={0} onChange={(v) => update({ licenciasPW: v })} />
+          </Field>
+        </div>
+      </Card>
+
+      {/* Sección D */}
+      <Card className="p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-gray-800">D · Ingenieros metrólogos</h3>
+          <Btn variant="secondary" onClick={addIng}>+ Agregar ingeniero</Btn>
+        </div>
+        <div className="space-y-2">
+          {lab.ingenieros.map((e) => (
+            <div key={e.id} className="grid grid-cols-12 gap-2 items-end bg-gray-50 rounded-lg p-2">
+              <div className="col-span-4">
+                <Field label="Nombre">
+                  <TextInput value={e.nombre} onChange={(ev) => updIng(e.id, { nombre: ev.target.value })} />
+                </Field>
+              </div>
+              <div className="col-span-3">
+                <Field label="Nivel">
+                  <Select value={e.nivel} onChange={(v) => updIng(e.id, { nivel: v })} options={NIVELES_LIST} />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <Field label="Turno">
+                  <Select value={e.turno} onChange={(v) => updIng(e.id, { turno: v })} options={turnoOpts} />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <Field label="Puede operar">
+                  <Select value={e.puedeOperar} onChange={(v) => updIng(e.id, { puedeOperar: v })} options={["Manual", "Automatizado", "Ambos"]} />
+                </Field>
+              </div>
+              <div className="col-span-1 flex justify-end">
+                <Btn variant="danger" className="ads-iconbtn" onClick={() => delIng(e.id)}>✕</Btn>
+              </div>
+            </div>
+          ))}
+          {!lab.ingenieros.length && <p className="text-sm text-gray-400">Sin ingenieros. Agrega al menos uno.</p>}
+        </div>
+        <p className="ads-t11 text-gray-400 mt-2">
+          Factor de habilidad usado en el cálculo: promedio de los niveles capturados (Experto 1.0 · Avanzado 1.25 · Intermedio 1.6 · Iniciación 2.2).
+        </p>
+      </Card>
+
+      {errors.length > 0 && (
+        <div className="rounded-lg p-3 text-sm" style={{ background: "#FEF2F2", color: "#B91C1C" }}>
+          {errors.map((e) => (
+            <div key={e}>• {e}</div>
+          ))}
+        </div>
+      )}
+      <div className="flex justify-end">
+        <Btn onClick={onNext} disabled={errors.length > 0}>Siguiente →</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- PANTALLA 2: CARGA BASE ---------------------------- */
+function Pantalla2({ lab, cargaBase, setCargaBase, onBack, onNext }) {
+  const equiposActivos = lab.equipos
+    .filter((e) => e.estado === "Activo" && (e.modelo === "ScanBox" || e.modelo === "HandySCAN"))
+    .map((e) => e.modelo);
+  const opcionesEquipo = Array.from(new Set(equiposActivos.length ? equiposActivos : ["ScanBox", "HandySCAN"]));
+
+  const add = () =>
+    setCargaBase([
+      ...cargaBase,
+      {
+        id: uid(),
+        tipo: "Monitoreo",
+        piezasPorSemana: 20,
+        complejidad: "B",
+        equipoRequerido: opcionesEquipo[0],
+        requiereTemplate: false,
+        requierePW: true,
+      },
+    ]);
+  const upd = (id, patch) => setCargaBase(cargaBase.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  const del = (id) => setCargaBase(cargaBase.filter((a) => a.id !== id));
+
+  // mini-resumen base (sin proyectos)
+  const model = useMemo(
+    () => computeModel(lab, cargaBase, [], { planta: true, proyectos: {} }),
+    [lab, cargaBase]
+  );
+  const base = model.serie[0]; // constante en todas las semanas
+
+  return (
+    <div className="space-y-5">
+      <Card className="p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="font-semibold text-gray-800">Carga base semanal</h3>
+            <p className="text-xs text-gray-400">Carga operativa recurrente; se replica en las 52 semanas fiscales.</p>
+          </div>
+          <Btn variant="secondary" onClick={add}>+ Agregar actividad</Btn>
+        </div>
+        <div className="space-y-2">
+          {cargaBase.map((a) => (
+            <div key={a.id} className="grid grid-cols-12 gap-2 items-end bg-gray-50 rounded-lg p-2">
+              <div className="col-span-2">
+                <Field label="Tipo">
+                  <Select value={a.tipo} onChange={(v) => upd(a.id, { tipo: v })} options={["Monitoreo", "Liberación", "Medición especial"]} />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <Field label="Pzs/sem">
+                  <NumberInput value={a.piezasPorSemana} min={0} onChange={(v) => upd(a.id, { piezasPorSemana: v })} />
+                </Field>
+              </div>
+              <div className="col-span-1">
+                <Field label="Compl.">
+                  <Select value={a.complejidad} onChange={(v) => upd(a.id, { complejidad: v })} options={COMPLEJIDADES} />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <Field label="Equipo">
+                  <Select value={a.equipoRequerido} onChange={(v) => upd(a.id, { equipoRequerido: v })} options={opcionesEquipo} />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <Field label="¿Template nuevo?">
+                  <Toggle value={a.requiereTemplate} onChange={(v) => upd(a.id, { requiereTemplate: v })} />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <Field label="¿Inspección PW?">
+                  <Toggle value={a.requierePW} onChange={(v) => upd(a.id, { requierePW: v })} />
+                </Field>
+              </div>
+              <div className="col-span-1 flex justify-end">
+                <Btn variant="danger" className="ads-iconbtn" onClick={() => del(a.id)}>✕</Btn>
+              </div>
+            </div>
+          ))}
+          {!cargaBase.length && <p className="text-sm text-gray-400">Sin actividades de carga base aún.</p>}
+        </div>
+      </Card>
+
+      <Card className="p-5">
+        <h3 className="font-semibold text-gray-800 mb-1">Saturación base (sin proyectos)</h3>
+        <p className="text-xs text-gray-400 mb-4">Demanda recurrente contra la capacidad instalada, por semana.</p>
+        <div className="space-y-3">
+          {[
+            { label: "Scanner", pct: base.scanner.sat },
+            { label: "Ingeniero", pct: base.ing.sat },
+            { label: "Licencia PW", pct: base.pw.sat },
+          ].map((r) => {
+            const st = satStyle(r.pct);
+            return (
+              <div key={r.label}>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="font-medium text-gray-600">{r.label}</span>
+                  <span className="font-bold" style={{ color: st.text }}>{r1(r.pct)}%</span>
+                </div>
+                <Bar pct={r.pct} />
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <div className="flex justify-between">
+        <Btn variant="ghost" onClick={onBack}>← Atrás</Btn>
+        <Btn onClick={onNext}>Siguiente →</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- PANTALLA 3: PROYECTOS NPI ---------------------------- */
+function Pantalla3({ proyectos, setProyectos, onBack, onNext }) {
+  const [open, setOpen] = useState({});
+
+  const addProy = () => {
+    const id = uid();
+    setProyectos([...proyectos, { id, nombre: `Proyecto ${proyectos.length + 1}`, lider: "", notas: "", etapas: [] }]);
+    setOpen((o) => ({ ...o, [id]: true }));
+  };
+  const updProy = (id, patch) => setProyectos(proyectos.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  const delProy = (id) => setProyectos(proyectos.filter((p) => p.id !== id));
+
+  const addEtapa = (pid) => {
+    setProyectos(
+      proyectos.map((p) =>
+        p.id === pid
+          ? {
+              ...p,
+              etapas: [...p.etapas, { id: uid(), etapaClave: "DPP", semanaInicio: 1, semanaFin: 4, partes: [] }],
+            }
+          : p
+      )
+    );
+  };
+  const updEtapa = (pid, eid, patch) =>
+    setProyectos(
+      proyectos.map((p) =>
+        p.id === pid ? { ...p, etapas: p.etapas.map((e) => (e.id === eid ? { ...e, ...patch } : e)) } : p
+      )
+    );
+  const delEtapa = (pid, eid) =>
+    setProyectos(proyectos.map((p) => (p.id === pid ? { ...p, etapas: p.etapas.filter((e) => e.id !== eid) } : p)));
+
+  const addParte = (pid, eid) =>
+    setProyectos(
+      proyectos.map((p) =>
+        p.id === pid
+          ? {
+              ...p,
+              etapas: p.etapas.map((e) =>
+                e.id === eid
+                  ? {
+                      ...e,
+                      partes: [
+                        ...e.partes,
+                        {
+                          id: uid(),
+                          numeroParte: "",
+                          complejidad: "B",
+                          piezas: 5,
+                          metodo: "ScanBox",
+                          requiereTemplateScan: true,
+                          requiereTemplatePW: true,
+                        },
+                      ],
+                    }
+                  : e
+              ),
+            }
+          : p
+      )
+    );
+  const updParte = (pid, eid, ptid, patch) =>
+    setProyectos(
+      proyectos.map((p) =>
+        p.id === pid
+          ? {
+              ...p,
+              etapas: p.etapas.map((e) =>
+                e.id === eid
+                  ? { ...e, partes: e.partes.map((pt) => (pt.id === ptid ? { ...pt, ...patch } : pt)) }
+                  : e
+              ),
+            }
+          : p
+      )
+    );
+  const delParte = (pid, eid, ptid) =>
+    setProyectos(
+      proyectos.map((p) =>
+        p.id === pid
+          ? {
+              ...p,
+              etapas: p.etapas.map((e) =>
+                e.id === eid ? { ...e, partes: e.partes.filter((pt) => pt.id !== ptid) } : e
+              ),
+            }
+          : p
+      )
+    );
+
+  // rango de semanas para el mini-Gantt
+  let maxW = 12;
+  proyectos.forEach((p) => p.etapas.forEach((e) => (maxW = Math.max(maxW, Number(e.semanaFin) || 0))));
+  maxW = clamp(maxW, 12, 52);
+  const weeksArr = Array.from({ length: maxW }, (_, i) => i + 1);
+
+  const etapaOpts = ETAPAS_NPI.map((e) => ({ value: e.clave, label: `${e.clave} · ${e.nombre}` }));
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="font-semibold text-gray-800">Proyectos NPI</h3>
+          <p className="text-xs text-gray-400">Proyecto → etapa → número de parte.</p>
+        </div>
+        <Btn variant="secondary" onClick={addProy}>+ Agregar proyecto</Btn>
+      </div>
+
+      {proyectos.map((p, pi) => {
+        const color = PROJECT_COLORS[pi % PROJECT_COLORS.length];
+        const isOpen = open[p.id];
+        return (
+          <Card key={p.id} className="overflow-hidden">
+            <div
+              className="flex items-center gap-3 p-4 cursor-pointer"
+              style={{ borderLeft: `5px solid ${color}` }}
+              onClick={() => setOpen((o) => ({ ...o, [p.id]: !o[p.id] }))}
+            >
+              <span className="text-gray-400">{isOpen ? "▾" : "▸"}</span>
+              <div className="flex-1 grid grid-cols-2 gap-3" onClick={(e) => e.stopPropagation()}>
+                <Field label="Nombre del proyecto">
+                  <TextInput value={p.nombre} onChange={(e) => updProy(p.id, { nombre: e.target.value })} />
+                </Field>
+                <Field label="Líder de calidad">
+                  <TextInput value={p.lider} onChange={(e) => updProy(p.id, { lider: e.target.value })} />
+                </Field>
+              </div>
+              <Btn variant="danger" className="ads-iconbtn" onClick={(e) => { e.stopPropagation(); delProy(p.id); }}>✕</Btn>
+            </div>
+
+            {isOpen && (
+              <div className="px-4 pb-4 space-y-3" style={{ background: "#FAFAFA" }}>
+                <Field label="Notas">
+                  <textarea
+                    className={inputCls}
+                    rows={2}
+                    value={p.notas}
+                    onChange={(e) => updProy(p.id, { notas: e.target.value })}
+                  />
+                </Field>
+
+                {p.etapas.map((e) => {
+                  const meta = ETAPAS_NPI.find((x) => x.clave === e.etapaClave);
+                  return (
+                    <div key={e.id} className="rounded-lg border border-gray-200 bg-white p-3 space-y-3">
+                      <div className="grid grid-cols-12 gap-2 items-end">
+                        <div className="col-span-5">
+                          <Field label="Etapa">
+                            <Select
+                              value={e.etapaClave}
+                              onChange={(v) => {
+                                const m = ETAPAS_NPI.find((x) => x.clave === v);
+                                updEtapa(p.id, e.id, m.semanaUnica ? { etapaClave: v, semanaFin: e.semanaInicio } : { etapaClave: v });
+                              }}
+                              options={etapaOpts}
+                            />
+                          </Field>
+                        </div>
+                        <div className="col-span-3">
+                          <Field label="Sem. inicio">
+                            <NumberInput
+                              value={e.semanaInicio}
+                              min={1}
+                              max={52}
+                              onChange={(v) => updEtapa(p.id, e.id, meta.semanaUnica ? { semanaInicio: v, semanaFin: v } : { semanaInicio: v })}
+                            />
+                          </Field>
+                        </div>
+                        <div className="col-span-3">
+                          <Field label="Sem. fin">
+                            <NumberInput
+                              value={e.semanaFin}
+                              min={1}
+                              max={52}
+                              disabled={meta.semanaUnica}
+                              onChange={(v) => updEtapa(p.id, e.id, { semanaFin: v })}
+                            />
+                          </Field>
+                        </div>
+                        <div className="col-span-1 flex justify-end">
+                          <Btn variant="danger" className="ads-iconbtn" onClick={() => delEtapa(p.id, e.id)}>✕</Btn>
+                        </div>
+                      </div>
+
+                      {/* partes */}
+                      <div className="space-y-2 pl-3 border-l-2" style={{ borderColor: color }}>
+                        {e.partes.map((pt) => (
+                          <div key={pt.id} className="grid grid-cols-12 gap-2 items-end bg-gray-50 rounded-lg p-2">
+                            <div className="col-span-3">
+                              <Field label="N° de parte">
+                                <TextInput value={pt.numeroParte} placeholder="WR17X12345" onChange={(ev) => updParte(p.id, e.id, pt.id, { numeroParte: ev.target.value })} />
+                              </Field>
+                            </div>
+                            <div className="col-span-1">
+                              <Field label="Compl.">
+                                <Select value={pt.complejidad} onChange={(v) => updParte(p.id, e.id, pt.id, { complejidad: v })} options={COMPLEJIDADES} />
+                              </Field>
+                            </div>
+                            <div className="col-span-2">
+                              <Field label="Piezas">
+                                <NumberInput value={pt.piezas} min={0} onChange={(v) => updParte(p.id, e.id, pt.id, { piezas: v })} />
+                              </Field>
+                            </div>
+                            <div className="col-span-2">
+                              <Field label="Método">
+                                <Select value={pt.metodo} onChange={(v) => updParte(p.id, e.id, pt.id, { metodo: v })} options={["ScanBox", "HandySCAN", "Ambos"]} />
+                              </Field>
+                            </div>
+                            <div className="col-span-2">
+                              <Field label="¿Template scan?">
+                                <Toggle value={pt.requiereTemplateScan} onChange={(v) => updParte(p.id, e.id, pt.id, { requiereTemplateScan: v })} />
+                              </Field>
+                            </div>
+                            <div className="col-span-1">
+                              <Field label="¿Templ. PW?">
+                                <Toggle value={pt.requiereTemplatePW} onChange={(v) => updParte(p.id, e.id, pt.id, { requiereTemplatePW: v })} />
+                              </Field>
+                            </div>
+                            <div className="col-span-1 flex justify-end">
+                              <Btn variant="danger" className="ads-iconbtn" onClick={() => delParte(p.id, e.id, pt.id)}>✕</Btn>
+                            </div>
+                          </div>
+                        ))}
+                        <Btn variant="ghost" className="ads-btn-xs" onClick={() => addParte(p.id, e.id)}>+ Agregar número de parte</Btn>
+                      </div>
+                    </div>
+                  );
+                })}
+                <Btn variant="secondary" className="ads-btn-sm15" onClick={() => addEtapa(p.id)}>+ Agregar etapa</Btn>
+              </div>
+            )}
+          </Card>
+        );
+      })}
+
+      {/* mini-Gantt */}
+      {proyectos.length > 0 && (
+        <Card className="p-5">
+          <h3 className="font-semibold text-gray-800 mb-1">Mapa de empalmes por semana fiscal</h3>
+          <p className="text-xs text-gray-400 mb-3">Las barras muestran en qué semanas cae la carga de cada proyecto.</p>
+          <div className="overflow-x-auto">
+            <div style={{ minWidth: maxW * 26 + 140 }}>
+              <div className="flex ads-t9 text-gray-400 mb-1" style={{ paddingLeft: 140 }}>
+                {weeksArr.map((w) => (
+                  <div key={w} style={{ width: 26, textAlign: "center" }}>{w}</div>
+                ))}
+              </div>
+              {proyectos.map((p, pi) => {
+                const color = PROJECT_COLORS[pi % PROJECT_COLORS.length];
+                const cover = {};
+                p.etapas.forEach((e) => {
+                  const a = clamp(Number(e.semanaInicio) || 1, 1, 52);
+                  const b = clamp(Number(e.semanaFin) || a, a, 52);
+                  for (let w = a; w <= b; w++) cover[w] = (cover[w] || 0) + 1;
+                });
+                return (
+                  <div key={p.id} className="flex items-center mb-1">
+                    <div className="ads-t11 text-gray-600 truncate" style={{ width: 140, paddingRight: 8 }}>{p.nombre}</div>
+                    <div className="flex">
+                      {weeksArr.map((w) => (
+                        <div key={w} style={{ width: 26, padding: "0 1px" }}>
+                          <div
+                            style={{
+                              height: 14,
+                              borderRadius: 3,
+                              background: cover[w] ? color : "#F3F4F6",
+                              opacity: cover[w] ? clamp(0.45 + cover[w] * 0.25, 0.45, 1) : 1,
+                            }}
+                            title={cover[w] ? `${p.nombre} · semana ${w}` : ""}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <div className="flex justify-between">
+        <Btn variant="ghost" onClick={onBack}>← Atrás</Btn>
+        <Btn onClick={onNext}>Ver saturación →</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- helpers de dashboard ---------------------------- */
+function projColor(proyectos, id) {
+  if (id === "planta") return VERDE;
+  const i = proyectos.findIndex((p) => p.id === id);
+  return PROJECT_COLORS[(i < 0 ? 0 : i) % PROJECT_COLORS.length];
+}
+function projName(proyectos, id) {
+  if (id === "planta") return "Carga planta";
+  const p = proyectos.find((p) => p.id === id);
+  return p ? p.nombre : id;
+}
+function makeSegments(srcMap, proyectos) {
+  const total = Object.values(srcMap).reduce((a, b) => a + b, 0);
+  if (total <= 0) return [];
+  return Object.entries(srcMap)
+    .sort((a, b) => (a[0] === "planta" ? -1 : 1))
+    .map(([src, hrs]) => ({ frac: hrs / total, color: projColor(proyectos, src), src }));
+}
+
+/* ---------------------------- PANTALLA 4: DASHBOARD ---------------------------- */
+function Dashboard({ lab, cargaBase, proyectos, onExport, onSave }) {
+  const [filtros, setFiltros] = useState(() => ({
+    planta: true,
+    proyectos: Object.fromEntries(proyectos.map((p) => [p.id, true])),
+  }));
+  const [showDetalle, setShowDetalle] = useState(false);
+
+  const model = useMemo(() => computeModel(lab, cargaBase, proyectos, filtros), [lab, cargaBase, proyectos, filtros]);
+  const [selWeek, setSelWeek] = useState(model.worst.week);
+
+  const wIdx = clamp(selWeek, 1, 52);
+  const sweek = model.serie[wIdx - 1];
+  const weekData = model.weeks[wIdx];
+
+  // recurso más saturado en la semana seleccionada
+  const selResSats = [
+    { key: "scanner", sat: sweek.scanner.sat },
+    { key: "ing", sat: sweek.ing.sat },
+    { key: "pw", sat: sweek.pw.sat },
+  ];
+  const selBottleneck = selResSats.reduce((a, b) => (b.sat > a.sat ? b : a)).key;
+
+  const st = satStyle(model.worst.maxSat);
+  const activos = lab.equipos.filter((e) => e.estado === "Activo");
+
+  // rango de semanas a mostrar en el gantt
+  let maxW = 12;
+  proyectos.forEach((p) => p.etapas.forEach((e) => (maxW = Math.max(maxW, Number(e.semanaFin) || 0))));
+  maxW = clamp(maxW, 12, 52);
+  const weeksArr = Array.from({ length: maxW }, (_, i) => i + 1);
+
+  const deficitMsgs = [];
+  if (model.deficit.ing) deficitMsgs.push(`+${model.deficit.ing} ingeniero(s)`);
+  if (model.scannersNeeded) deficitMsgs.push(`+${model.scannersNeeded} scanner(s)`);
+  if (model.deficit.pw) deficitMsgs.push(`+${model.deficit.pw} licencia(s) PW`);
+
+  return (
+    <div className="space-y-5">
+      {/* ---------- NIVEL 1: RESUMEN EJECUTIVO ---------- */}
+      <Card className="p-5">
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+          <h3 className="font-semibold text-gray-800">Resumen ejecutivo</h3>
+          <Pill bg={st.bg} color={st.text}>
+            {r1(model.worst.maxSat)}% · {st.label}
+          </Pill>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <MiniStat label="Semana más saturada" value={`Sem ${model.worst.week}`} sub={`${r1(model.worst.maxSat)}% pico`} />
+          <MiniStat label="Cuello de botella" value={model.bottleneck.label} sub={`${r1(model.bottleneck.sat)}%`} accent />
+          <MiniStat
+            label="Turno más comprometido"
+            value={model.turnoCrit ? model.turnoCrit.turno : "—"}
+            sub={model.turnoCrit ? `${r1(model.turnoCrit.sat)}% · ${model.turnoCrit.eng} ing.` : ""}
+          />
+          <MiniStat
+            label="Recursos adicionales"
+            value={deficitMsgs.length ? deficitMsgs[0] : "Ninguno"}
+            sub={deficitMsgs.slice(1).join(" · ")}
+            danger={deficitMsgs.length > 0}
+          />
+        </div>
+      </Card>
+
+      {/* ---------- NIVEL 2: TABLERO VISUAL ---------- */}
+      <Card className="p-5">
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <h3 className="font-semibold text-gray-800">Tablero semanal</h3>
+          <span className="text-xs text-gray-400">Click en una semana para inspeccionar los vasos</span>
+        </div>
+
+        {/* slicers */}
+        <div className="flex flex-wrap gap-2 mb-4">
+          <SlicerBtn on={filtros.planta} color={VERDE} onClick={() => setFiltros((f) => ({ ...f, planta: !f.planta }))}>
+            Carga planta
+          </SlicerBtn>
+          {proyectos.map((p, i) => (
+            <SlicerBtn
+              key={p.id}
+              on={filtros.proyectos[p.id]}
+              color={PROJECT_COLORS[i % PROJECT_COLORS.length]}
+              onClick={() => setFiltros((f) => ({ ...f, proyectos: { ...f.proyectos, [p.id]: !f.proyectos[p.id] } }))}
+            >
+              {p.nombre}
+            </SlicerBtn>
+          ))}
+        </div>
+
+        {/* gantt */}
+        <div className="overflow-x-auto mb-2">
+          <div style={{ minWidth: maxW * 26 + 150 }}>
+            <div className="flex ads-t9 text-gray-400 mb-1" style={{ paddingLeft: 150 }}>
+              {weeksArr.map((w) => (
+                <div key={w} style={{ width: 26, textAlign: "center" }}>{w}</div>
+              ))}
+            </div>
+            {/* fila carga planta */}
+            <GanttRow
+              name="Carga planta"
+              weeksArr={weeksArr}
+              selWeek={wIdx}
+              onPick={setSelWeek}
+              cells={weeksArr.map(() => (filtros.planta ? VERDE : null))}
+            />
+            {/* filas proyectos */}
+            {proyectos.map((p, pi) => {
+              if (!filtros.proyectos[p.id]) return null;
+              const color = PROJECT_COLORS[pi % PROJECT_COLORS.length];
+              const cover = {};
+              p.etapas.forEach((e) => {
+                const a = clamp(Number(e.semanaInicio) || 1, 1, 52);
+                const b = clamp(Number(e.semanaFin) || a, a, 52);
+                for (let w = a; w <= b; w++) cover[w] = true;
+              });
+              return (
+                <GanttRow
+                  key={p.id}
+                  name={p.nombre}
+                  weeksArr={weeksArr}
+                  selWeek={wIdx}
+                  onPick={setSelWeek}
+                  cells={weeksArr.map((w) => (cover[w] ? color : null))}
+                />
+              );
+            })}
+            {/* fila saturación pico */}
+            <div className="flex items-center mt-1">
+              <div className="ads-t10 text-gray-400" style={{ width: 150, paddingRight: 8 }}>Saturación pico</div>
+              <div className="flex">
+                {weeksArr.map((w) => {
+                  const s = model.serie[w - 1].maxSat;
+                  const stt = satStyle(s);
+                  return (
+                    <div key={w} style={{ width: 26, padding: "0 1px" }}>
+                      <div
+                        onClick={() => setSelWeek(w)}
+                        className="cursor-pointer"
+                        style={{ height: 14, borderRadius: 3, background: s > 0 ? stt.bar : "#F3F4F6", outline: w === wIdx ? "2px solid #111" : "none" }}
+                        title={`Semana ${w}: ${r1(s)}%`}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="text-xs font-medium text-gray-500 mb-3">
+          Inspeccionando <b style={{ color: TEAL }}>Semana {wIdx}</b>
+        </div>
+
+        {/* VASOS */}
+        <div className="space-y-4">
+          <VesselGroup
+            title="Ingenieros"
+            cap={`Capacidad ${r1(model.caps.perIngCap)} h/sem c/u`}
+            items={lab.ingenieros.map((ing) => ({
+              kind: "person",
+              pct: sweek.ing.sat,
+              segments: makeSegments(weekData.ing, proyectos),
+              title: ing.nombre,
+              subtitle: `${ing.nivel} · ${ing.turno}`,
+              bottleneck: selBottleneck === "ing",
+            }))}
+          />
+          <VesselGroup
+            title="Scanners"
+            cap={`Capacidad ${r1(model.caps.perScannerCap)} h/sem c/u`}
+            items={activos
+              .filter((e) => e.modelo === "ScanBox" || e.modelo === "HandySCAN")
+              .map((e) => {
+                const isSB = e.modelo === "ScanBox";
+                return {
+                  kind: "scanner",
+                  pct: isSB ? sweek.scanBox.sat : sweek.handy.sat,
+                  segments: makeSegments(isSB ? weekData.scanBox : weekData.handy, proyectos),
+                  title: e.nombre,
+                  subtitle: e.modelo,
+                  bottleneck: selBottleneck === "scanner" && sweek.scanner.sat === (isSB ? sweek.scanBox.sat : sweek.handy.sat),
+                };
+              })}
+          />
+          <VesselGroup
+            title="Licencias PolyWorks"
+            cap={`Capacidad ${r1(model.caps.perPWCap)} h/sem c/u`}
+            items={Array.from({ length: model.counts.nLic }, (_, i) => ({
+              kind: "monitor",
+              pct: sweek.pw.sat,
+              segments: makeSegments(weekData.pw, proyectos),
+              title: `Licencia ${i + 1}`,
+              subtitle: "PolyWorks",
+              bottleneck: selBottleneck === "pw",
+            }))}
+          />
+        </div>
+
+        {/* leyenda */}
+        <div className="flex flex-wrap gap-3 mt-4 ads-t11 text-gray-500">
+          <Legend color={VERDE} label="Carga planta" />
+          {proyectos.map((p, i) => (
+            <Legend key={p.id} color={PROJECT_COLORS[i % PROJECT_COLORS.length]} label={p.nombre} />
+          ))}
+          <Legend color={ROJO} label="Desborde >100%" />
+        </div>
+      </Card>
+
+      {/* ---------- NIVEL 3: DETALLE ---------- */}
+      <Card className="p-5">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h3 className="font-semibold text-gray-800">Detalle analítico</h3>
+          <div className="flex gap-2 flex-wrap">
+            <Btn variant="ghost" onClick={() => setShowDetalle((s) => !s)}>{showDetalle ? "Ocultar detalle" : "Ver detalle"}</Btn>
+            <Btn variant="secondary" onClick={() => onSave(model)}>Guardar escenario</Btn>
+            <Btn onClick={() => onExport(model, filtros)}>Exportar reporte</Btn>
+          </div>
+        </div>
+
+        {showDetalle && (
+          <div className="mt-4 space-y-5">
+            <DetalleProcesos lab={lab} proyectos={proyectos} model={model} />
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, sub, accent, danger }) {
+  return (
+    <div className="rounded-lg p-3" style={{ background: danger ? "#FEF2F2" : accent ? "#F0F9FF" : "#F9FAFB" }}>
+      <div className="ads-t11 text-gray-500">{label}</div>
+      <div className="text-base font-bold" style={{ color: danger ? "#B91C1C" : accent ? TEAL : "#111827" }}>{value}</div>
+      {sub && <div className="ads-t11 text-gray-400">{sub}</div>}
+    </div>
+  );
+}
+function SlicerBtn({ on, color, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border transition-all"
+      style={on ? { background: color, color: "#fff", borderColor: color } : { background: "#fff", color: "#9CA3AF", borderColor: "#E5E7EB" }}
+    >
+      <span className="inline-block rounded-full" style={{ width: 8, height: 8, background: on ? "#fff" : color }} />
+      {children}
+    </button>
+  );
+}
+function GanttRow({ name, weeksArr, cells, selWeek, onPick }) {
+  return (
+    <div className="flex items-center mb-1">
+      <div className="ads-t11 text-gray-600 truncate" style={{ width: 150, paddingRight: 8 }}>{name}</div>
+      <div className="flex">
+        {weeksArr.map((w, i) => (
+          <div key={w} style={{ width: 26, padding: "0 1px" }}>
+            <div
+              onClick={() => onPick(w)}
+              className="cursor-pointer"
+              style={{
+                height: 16,
+                borderRadius: 3,
+                background: cells[i] || "#F3F4F6",
+                outline: w === selWeek ? "2px solid #111" : "none",
+                outlineOffset: -1,
+              }}
+              title={`Semana ${w}`}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function VesselGroup({ title, cap, items }) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h4 className="text-sm font-semibold text-gray-700">{title}</h4>
+        <span className="ads-t10 text-gray-400">{cap}</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {items.length ? (
+          items.map((it, i) => <Vessel key={i} {...it} />)
+        ) : (
+          <span className="text-xs text-gray-400">Sin recursos de este tipo.</span>
+        )}
+      </div>
+    </div>
+  );
+}
+function Legend({ color, label }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className="inline-block rounded-sm" style={{ width: 10, height: 10, background: color }} />
+      {label}
+    </span>
+  );
+}
+
+/* ---------------------------- NIVEL 3: tabla de procesos ---------------------------- */
+function DetalleProcesos({ lab, proyectos, model }) {
+  const f = model.factor;
+  const rows = [];
+  proyectos.forEach((p) => {
+    p.etapas.forEach((e) => {
+      const meta = ETAPAS_NPI.find((x) => x.clave === e.etapaClave);
+      e.partes.forEach((pt) => {
+        const h = partHours(pt.complejidad, Number(pt.piezas) || 0, pt.metodo, pt.requiereTemplateScan, pt.requiereTemplatePW, true);
+        const d = partDemand(h, f);
+        rows.push({
+          proy: p.nombre,
+          etapa: meta ? meta.clave : e.etapaClave,
+          parte: pt.numeroParte || "(s/n)",
+          compl: pt.complejidad,
+          piezas: pt.piezas,
+          tScan: h.hTemplateScan * f,
+          esc: (h.hEscaneoScanBox + h.hEscaneoHandy) * f,
+          tPW: h.hTemplatePW * f,
+          medPW: h.hMedicionPW * f,
+          ing: d.ing,
+          equipo: d.scanBox + d.handy,
+          pw: d.pw,
+        });
+      });
+    });
+  });
+
+  const Th = ({ children, r }) => (
+    <th className={"px-2 py-1.5 ads-t11 font-semibold text-gray-500 " + (r ? "text-right" : "text-left")}>{children}</th>
+  );
+  const Td = ({ children, r, b }) => (
+    <td className={"px-2 py-1.5 text-xs " + (r ? "text-right tabular-nums " : "") + (b ? "font-semibold text-gray-800" : "text-gray-600")}>{children}</td>
+  );
+
+  if (!rows.length) return <p className="text-sm text-gray-400">No hay números de parte capturados en los proyectos.</p>;
+
+  return (
+    <div className="overflow-x-auto">
+      <p className="ads-t11 text-gray-400 mb-2">
+        Horas ya ajustadas por factor de habilidad promedio ({r1(f)}×). Las horas de proceso son el total de la corrida (no por semana).
+      </p>
+      <table className="w-full border-collapse">
+        <thead>
+          <tr className="border-b border-gray-200">
+            <Th>Proyecto</Th>
+            <Th>Etapa</Th>
+            <Th>N° parte</Th>
+            <Th>Compl.</Th>
+            <Th r>Pzs</Th>
+            <Th r>Templ. scan</Th>
+            <Th r>Escaneo</Th>
+            <Th r>Templ. PW</Th>
+            <Th r>Medición PW</Th>
+            <Th r>H. ingeniero</Th>
+            <Th r>H. equipo</Th>
+            <Th r>H. licencia</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} className="border-b border-gray-100">
+              <Td>{r.proy}</Td>
+              <Td>{r.etapa}</Td>
+              <Td b>{r.parte}</Td>
+              <Td>{r.compl}</Td>
+              <Td r>{r.piezas}</Td>
+              <Td r>{r1(r.tScan)}</Td>
+              <Td r>{r1(r.esc)}</Td>
+              <Td r>{r1(r.tPW)}</Td>
+              <Td r>{r1(r.medPW)}</Td>
+              <Td r b>{r1(r.ing)}</Td>
+              <Td r>{r1(r.equipo)}</Td>
+              <Td r>{r1(r.pw)}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ---------------------------- REPORTE EXPORTABLE ---------------------------- */
+function Reporte({ lab, proyectos, model, onBack }) {
+  const w = model.worst;
+  const st = satStyle(w.maxSat);
+  const fecha = new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" });
+  const resumen = [
+    { label: "Scanner", pct: w.scanner.sat },
+    { label: "Ingeniero", pct: w.ing.sat },
+    { label: "Licencia PW", pct: w.pw.sat },
+  ];
+  const Th = ({ children, r }) => (
+    <th style={{ padding: "6px 10px", textAlign: r ? "right" : "left", fontSize: 12, color: "#444", borderBottom: "1px solid #ccc" }}>{children}</th>
+  );
+  const Td = ({ children, r }) => (
+    <td style={{ padding: "6px 10px", textAlign: r ? "right" : "left", fontSize: 12, color: "#222", borderBottom: "1px solid #eee" }}>{children}</td>
+  );
+
+  return (
+    <div style={{ background: "#fff" }} className="min-h-screen">
+      <style>{`
+        .ads-wrap { max-width: 900px; margin-left: auto; margin-right: auto; }
+        .ads-t8  { font-size: 8px;  line-height: 1.2; }
+        .ads-t9  { font-size: 9px;  line-height: 1.25; }
+        .ads-t10 { font-size: 10px; line-height: 1.3; }
+        .ads-t11 { font-size: 11px; line-height: 1.35; }
+        @media print {
+          .ads-noprint { display: none !important; }
+          .ads-print-flush { padding-top: 0 !important; padding-bottom: 0 !important; }
+          body { background: #fff !important; }
+        }
+      `}</style>
+      <div className="ads-wrap px-6 py-8 ads-print-flush">
+        <div className="flex justify-between items-center mb-6 ads-noprint">
+          <Btn variant="ghost" onClick={onBack}>← Volver al dashboard</Btn>
+          <Btn onClick={() => window.print()}>Imprimir / PDF (Ctrl+P)</Btn>
+        </div>
+
+        <div style={{ borderBottom: `3px solid ${TEAL}`, paddingBottom: 12, marginBottom: 20 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 800, color: TEAL, margin: 0 }}>Reporte de Saturación · Laboratorio de Metrología 3D</h1>
+          <p style={{ fontSize: 13, color: "#555", margin: "4px 0 0" }}>
+            {lab.pais} — Planta {lab.planta} · {lab.turnos} turno(s) · {lab.hrsTurno} h × {lab.diasSemana} días · Generado {fecha}
+          </p>
+          <p style={{ fontSize: 13, color: "#555", margin: "2px 0 0" }}>
+            Semana analizada (pico): <b>Semana fiscal {w.week}</b>
+          </p>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+          <span style={{ background: st.bg, color: st.text, padding: "6px 14px", borderRadius: 999, fontWeight: 700, fontSize: 14 }}>
+            {r1(w.maxSat)}% · {st.label}
+          </span>
+          <span style={{ fontSize: 13, color: "#555" }}>
+            Cuello de botella: <b>{model.bottleneck.label}</b> ({r1(model.bottleneck.sat)}%)
+          </span>
+        </div>
+
+        {/* tarjetas resumen */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 24 }}>
+          {resumen.map((r) => {
+            const s = satStyle(r.pct);
+            return (
+              <div key={r.label} style={{ border: "1px solid #e5e5e5", borderRadius: 10, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#777" }}>{r.label}</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: s.text }}>{r1(r.pct)}%</div>
+              </div>
+            );
+          })}
+          <div style={{ border: "1px solid #e5e5e5", borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 11, color: "#777" }}>Cuello de botella</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: TEAL }}>{model.bottleneck.label}</div>
+          </div>
+        </div>
+
+        {/* recursos adicionales */}
+        {(model.deficit.ing || model.scannersNeeded || model.deficit.pw) > 0 && (
+          <div style={{ background: "#FEF2F2", border: "1px solid #FCA5A5", borderRadius: 10, padding: 12, marginBottom: 24 }}>
+            <b style={{ color: "#B91C1C", fontSize: 13 }}>Recursos adicionales requeridos (semana pico):</b>
+            <ul style={{ margin: "6px 0 0 18px", fontSize: 13, color: "#7F1D1D" }}>
+              {model.deficit.ing > 0 && <li>+{model.deficit.ing} ingeniero(s)</li>}
+              {model.scannersNeeded > 0 && <li>+{model.scannersNeeded} scanner(s)</li>}
+              {model.deficit.pw > 0 && <li>+{model.deficit.pw} licencia(s) PolyWorks</li>}
+            </ul>
+          </div>
+        )}
+
+        {/* tabla proyectos */}
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#222", marginBottom: 8 }}>Proyectos NPI</h2>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24 }}>
+          <thead>
+            <tr><Th>Proyecto</Th><Th>Líder</Th><Th r>Etapas</Th><Th r>N° parte</Th><Th r>Piezas</Th></tr>
+          </thead>
+          <tbody>
+            {proyectos.length ? proyectos.map((p) => {
+              const np = p.etapas.reduce((a, e) => a + e.partes.length, 0);
+              const pz = p.etapas.reduce((a, e) => a + e.partes.reduce((b, pt) => b + (Number(pt.piezas) || 0), 0), 0);
+              return (
+                <tr key={p.id}><Td>{p.nombre}</Td><Td>{p.lider || "—"}</Td><Td r>{p.etapas.length}</Td><Td r>{np}</Td><Td r>{pz}</Td></tr>
+              );
+            }) : <tr><Td>Sin proyectos</Td></tr>}
+          </tbody>
+        </table>
+
+        {/* tabla ingenieros */}
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#222", marginBottom: 8 }}>Ingenieros · saturación semana pico</h2>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24 }}>
+          <thead><tr><Th>Nombre</Th><Th>Nivel</Th><Th>Turno</Th><Th r>Saturación</Th></tr></thead>
+          <tbody>
+            {lab.ingenieros.map((i) => {
+              const s = satStyle(w.ing.sat);
+              return <tr key={i.id}><Td>{i.nombre}</Td><Td>{i.nivel}</Td><Td>{i.turno}</Td>
+                <td style={{ padding: "6px 10px", textAlign: "right", fontSize: 12, fontWeight: 700, color: s.text, borderBottom: "1px solid #eee" }}>{r1(w.ing.sat)}%</td></tr>;
+            })}
+          </tbody>
+        </table>
+
+        {/* tabla scanners */}
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#222", marginBottom: 8 }}>Scanners · saturación semana pico</h2>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24 }}>
+          <thead><tr><Th>Equipo</Th><Th>Modelo</Th><Th r>Saturación</Th></tr></thead>
+          <tbody>
+            {lab.equipos.filter((e) => e.estado === "Activo" && (e.modelo === "ScanBox" || e.modelo === "HandySCAN")).map((e) => {
+              const sat = e.modelo === "ScanBox" ? w.scanBox.sat : w.handy.sat;
+              const s = satStyle(sat);
+              return <tr key={e.id}><Td>{e.nombre}</Td><Td>{e.modelo}</Td>
+                <td style={{ padding: "6px 10px", textAlign: "right", fontSize: 12, fontWeight: 700, color: s.text, borderBottom: "1px solid #eee" }}>{r1(sat)}%</td></tr>;
+            })}
+          </tbody>
+        </table>
+
+        {/* tabla licencias */}
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#222", marginBottom: 8 }}>Licencias PolyWorks · saturación semana pico</h2>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24 }}>
+          <thead><tr><Th>Licencia</Th><Th r>Saturación</Th></tr></thead>
+          <tbody>
+            {Array.from({ length: model.counts.nLic }, (_, i) => {
+              const s = satStyle(w.pw.sat);
+              return <tr key={i}><Td>Licencia {i + 1}</Td>
+                <td style={{ padding: "6px 10px", textAlign: "right", fontSize: 12, fontWeight: 700, color: s.text, borderBottom: "1px solid #eee" }}>{r1(w.pw.sat)}%</td></tr>;
+            })}
+          </tbody>
+        </table>
+
+        <p style={{ fontSize: 11, color: "#999", marginTop: 24 }}>
+          Documento generado por la Calculadora de Saturación ADS · Selecciona el contenido para copiarlo a Word/correo, o usa Ctrl+P para PDF.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- ESCENARIOS ---------------------------- */
+function Escenarios({ escenarios, onNueva }) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold text-gray-800">Escenarios guardados</h3>
+        <Btn onClick={onNueva}>+ Nueva simulación</Btn>
+      </div>
+      {!escenarios.length ? (
+        <Card className="p-8 text-center text-gray-400 text-sm">
+          Aún no hay escenarios. Genera un análisis en el dashboard y pulsa “Guardar escenario”.
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {escenarios.map((s) => {
+            const st = satStyle(s.satMax);
+            return (
+              <Card key={s.id} className="p-4">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="font-semibold text-gray-800">{s.planta}</div>
+                    <div className="text-xs text-gray-400">{s.fecha} · {s.nProyectos} proyecto(s)</div>
+                  </div>
+                  <Pill bg={st.bg} color={st.text}>{s.viable ? "Viable" : "No da"}</Pill>
+                </div>
+                <div className="mt-3 flex items-center gap-3 text-sm">
+                  <span className="text-gray-500">Saturación máx.</span>
+                  <span className="font-bold" style={{ color: st.text }}>{r1(s.satMax)}%</span>
+                  <span className="text-gray-400">· Cuello: {s.bottleneck}</span>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------- SEED / ESTADO INICIAL ---------------------------- */
+function seedLab() {
+  return {
+    pais: "México",
+    planta: "Querétaro",
+    turnos: 2,
+    hrsTurno: 8,
+    diasSemana: 5,
+    licenciasPW: 2,
+    equipos: [
+      { id: uid(), nombre: "ScanBox #1", modelo: "ScanBox", tipoEscaneo: "Automatizado", estado: "Activo" },
+      { id: uid(), nombre: "HandySCAN #1", modelo: "HandySCAN", tipoEscaneo: "Manual", estado: "Activo" },
+    ],
+    ingenieros: [
+      { id: uid(), nombre: "A. Ramírez", nivel: "Experto", turno: "T1", puedeOperar: "Ambos" },
+      { id: uid(), nombre: "L. Gómez", nivel: "Intermedio", turno: "T2", puedeOperar: "Ambos" },
+    ],
+  };
+}
+function seedCarga() {
+  return [
+    { id: uid(), tipo: "Monitoreo", piezasPorSemana: 30, complejidad: "B", equipoRequerido: "ScanBox", requiereTemplate: false, requierePW: true },
+  ];
+}
+function seedProyectos() {
+  return [
+    {
+      id: uid(),
+      nombre: "NPI Lavadora WX",
+      lider: "M. Torres",
+      notas: "",
+      etapas: [
+        {
+          id: uid(),
+          etapaClave: "DPP",
+          semanaInicio: 6,
+          semanaFin: 12,
+          partes: [
+            { id: uid(), numeroParte: "WR17X12345", complejidad: "A", piezas: 8, metodo: "ScanBox", requiereTemplateScan: true, requiereTemplatePW: true },
+            { id: uid(), numeroParte: "WR22X54321", complejidad: "AA", piezas: 4, metodo: "Ambos", requiereTemplateScan: true, requiereTemplatePW: true },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+/* ---------------------------- APP ---------------------------- */
+function App() {
+  const [tab, setTab] = useState("Simulador");
+  const [step, setStep] = useState(1);
+  const [view, setView] = useState("app"); // app | reporte
+
+  const [lab, setLab] = useState(seedLab);
+  const [cargaBase, setCargaBase] = useState(seedCarga);
+  const [proyectos, setProyectos] = useState(seedProyectos);
+  const [escenarios, setEscenarios] = useState([]);
+  const [reporte, setReporte] = useState(null);
+
+  const goReporte = (model) => {
+    setReporte({ model });
+    setView("reporte");
+  };
+  const saveScenario = (model) => {
+    setEscenarios((arr) => [
+      {
+        id: uid(),
+        planta: `${lab.pais} · ${lab.planta}`,
+        fecha: new Date().toLocaleDateString("es-MX"),
+        nProyectos: proyectos.length,
+        satMax: model.worst.maxSat,
+        bottleneck: model.bottleneck.label,
+        viable: model.worst.maxSat < 100,
+      },
+      ...arr,
+    ]);
+    setTab("Escenarios");
+  };
+  const nuevaSimulacion = () => {
+    setLab(seedLab());
+    setCargaBase(seedCarga());
+    setProyectos(seedProyectos());
+    setStep(1);
+    setTab("Simulador");
+    setView("app");
+  };
+
+  if (view === "reporte" && reporte) {
+    return <Reporte lab={lab} proyectos={proyectos} model={reporte.model} onBack={() => setView("app")} />;
+  }
+
+  const dashboard = (
+    <Dashboard lab={lab} cargaBase={cargaBase} proyectos={proyectos} onExport={goReporte} onSave={saveScenario} />
+  );
+
+  return (
+    <div className="min-h-screen" style={{ background: "#F9FAFB", fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }}>
+      <style>{`
+        .ads-wrap { max-width: 900px; margin-left: auto; margin-right: auto; }
+        .ads-t8  { font-size: 8px;  line-height: 1.2; }
+        .ads-t9  { font-size: 9px;  line-height: 1.25; }
+        .ads-t10 { font-size: 10px; line-height: 1.3; }
+        .ads-t11 { font-size: 11px; line-height: 1.35; }
+        .ads-iconbtn  { padding: 0.5rem !important; }
+        .ads-btn-xs   { padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; font-size: 0.75rem !important; line-height: 1rem !important; }
+        .ads-btn-sm15 { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; }
+        @media print {
+          .ads-noprint { display: none !important; }
+          .ads-print-flush { padding-top: 0 !important; padding-bottom: 0 !important; }
+          body { background: #fff !important; }
+        }
+      `}</style>
+      {/* NAVBAR */}
+      <div style={{ background: TEAL }} className="text-white">
+        <div className="ads-wrap px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <div className="rounded-lg flex items-center justify-center font-black" style={{ width: 30, height: 30, background: "#fff", color: TEAL }}>A</div>
+            <div>
+              <div className="font-bold leading-tight">Calculadora de Saturación ADS</div>
+              <div className="ads-t11 opacity-80 leading-tight">Metrología Dimensional 3D · {lab.pais} / {lab.planta}</div>
+            </div>
+          </div>
+          <div className="flex gap-1 text-sm">
+            {["Simulador", "Dashboard", "Escenarios"].map((t) => (
+              <button
+                key={t}
+                onClick={() => { setTab(t); if (t === "Dashboard") setStep(4); }}
+                className="px-3 py-1.5 rounded-lg font-medium transition-colors"
+                style={tab === t ? { background: "rgba(255,255,255,0.22)" } : { background: "transparent", opacity: 0.85 }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="ads-wrap px-4 py-6">
+        {tab === "Simulador" && (
+          <>
+            <div className="mb-5">
+              <StepPills step={step} />
+            </div>
+            {step === 1 && <Pantalla1 lab={lab} setLab={setLab} onNext={() => setStep(2)} />}
+            {step === 2 && (
+              <Pantalla2 lab={lab} cargaBase={cargaBase} setCargaBase={setCargaBase} onBack={() => setStep(1)} onNext={() => setStep(3)} />
+            )}
+            {step === 3 && (
+              <Pantalla3 proyectos={proyectos} setProyectos={setProyectos} onBack={() => setStep(2)} onNext={() => setStep(4)} />
+            )}
+            {step === 4 && (
+              <>
+                <div className="flex justify-between mb-4">
+                  <Btn variant="ghost" onClick={() => setStep(3)}>← Editar proyectos</Btn>
+                  <Btn variant="ghost" onClick={() => setStep(1)}>Editar laboratorio</Btn>
+                </div>
+                {dashboard}
+              </>
+            )}
+          </>
+        )}
+
+        {tab === "Dashboard" && dashboard}
+
+        {tab === "Escenarios" && <Escenarios escenarios={escenarios} onNueva={nuevaSimulacion} />}
+      </div>
+
+      <div className="ads-wrap px-4 pb-8 ads-t11 text-gray-400">
+        Los datos viven solo en esta sesión; al recargar se reinician. Sin backend, sin almacenamiento local.
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- MONTAJE ---------------------------- */
+const _root = ReactDOM.createRoot(document.getElementById("root"));
+_root.render(<App />);
+
+  </script>
+</body>
+</html>
